@@ -5,34 +5,168 @@ const { cmd, embed, EPH, sendLog } = require('../utils');
 const btn = (id, label, emoji, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setEmoji(emoji).setStyle(style);
 const show = id => (id ? `<#${id}>` : '—');
  
+// ---------- Server-Vorlage für /setup ----------
+const LAYOUT = [
+  { name: '📌・INFO', access: 'public', channels: [
+    { name: '👋・willkommen', ro: true, ref: 'welcome' },
+    { name: '📜・regeln', ro: true, ref: 'rules' },
+    { name: '📢・ankündigungen', ro: true },
+    { name: '📅・zeitplan', ro: true, ref: 'schedule' },
+  ] },
+  { name: '🔴・TWITCH', access: 'public', channels: [
+    { name: '🔴・live-benachrichtigung', ro: true },
+    { name: '🎬・clips-und-highlights' },
+    { name: '💡・stream-vorschläge' },
+  ] },
+  { name: '💬・COMMUNITY', access: 'public', channels: [
+    { name: '💬・allgemein', ref: 'chat' },
+    { name: '😂・memes' },
+    { name: '🎮・gaming' },
+    { name: '🎨・kunst-und-bilder' },
+    { name: '🤖・bot-befehle' },
+    { name: '📈・level-ups', ro: true, key: 'level_channel' },
+    { name: '🎤・raum-steuerung', ro: true, ref: 'voicepanel' },
+  ] },
+  { name: '🔊・TALK', access: 'public', key: 'join_category', channels: [
+    { name: '➕・Raum erstellen', voice: true, key: 'join_channel' },
+    { name: '🔊・Lounge', voice: true },
+    { name: '🎮・Gaming 1', voice: true },
+    { name: '🎮・Gaming 2', voice: true },
+    { name: '🎵・Musik', voice: true },
+    { name: '💤・AFK', voice: true },
+  ] },
+  { name: '💜・SUBSCRIBER', access: 'sub', channels: [
+    { name: '💜・sub-chat' },
+    { name: '💜・Sub-Lounge', voice: true },
+  ] },
+  { name: '🎫・SUPPORT', access: 'public', channels: [
+    { name: '🎫・ticket-erstellen', ro: true, ref: 'ticket' },
+  ] },
+  { name: '🎫・Tickets', access: 'tickets', key: 'ticket_category', channels: [] },
+  { name: '👮・TEAM', access: 'team', channels: [
+    { name: '👮・mod-chat' },
+    { name: '📝・astra-logs', key: 'log_channel' },
+    { name: '👮・Team-Voice', voice: true },
+  ] },
+];
+ 
+const RULES = [
+  '**1. Respekt zuerst** – keine Beleidigungen, kein Hass, keine Diskriminierung.',
+  '**2. Kein Spam** – keine Flut-Nachrichten, keine unerlaubte Werbung oder Fremd-Links.',
+  '**3. Keine unangemessenen Inhalte** – kein NSFW, nichts Illegales, keine Gewaltdarstellungen.',
+  '**4. Bleib beim Thema** – nutze die Kanäle für ihren Zweck.',
+  '**5. Team-Anweisungen befolgen** – Moderatoren haben das letzte Wort.',
+  '**6. Die Regeln von Discord und Twitch gelten auch hier.**',
+].join('\n\n');
+ 
+function mergeOw(list) {
+  const m = new Map();
+  for (const o of list) {
+    const e = m.get(o.id) ?? { id: o.id, allow: [], deny: [] };
+    e.allow.push(...(o.allow ?? []));
+    e.deny.push(...(o.deny ?? []));
+    m.set(o.id, e);
+  }
+  return [...m.values()];
+}
+ 
 module.exports = [
   {
-    data: cmd('setup', 'Richtet AstraBot automatisch auf diesem Server ein', P.Administrator),
+    data: cmd('setup', 'Baut den kompletten Twitch-Community-Server auf', P.Administrator),
     async execute(i) {
       await i.deferReply(EPH);
-      const g = i.guild, me = g.members.me;
+      const g = i.guild, me = g.members.me, reason = 'AstraBot Setup';
+ 
+      const need = [['ManageChannels', 'Kanäle verwalten'], ['ManageRoles', 'Rollen verwalten'], ['ViewChannel', 'Kanäle ansehen'], ['SendMessages', 'Nachrichten senden'], ['EmbedLinks', 'Links einbetten']];
+      const missing = need.filter(([k]) => !me.permissions.has(P[k])).map(([, n]) => n);
+      if (missing.length) return i.editReply(`❌ Mir fehlen Berechtigungen: **${missing.join(', ')}**.\nGib der Rolle „AstraBot“ diese Rechte (oder Administrator) und führe \`/setup\` erneut aus.`);
+ 
       let cfg = db.getConfig(g.id);
-      const has = id => id && g.channels.cache.has(id);
-      const made = [];
-      const priv = [
-        { id: g.id, deny: [P.ViewChannel] },
-        { id: me.id, allow: [P.ViewChannel, P.SendMessages, P.EmbedLinks, P.ManageChannels] },
-      ];
-      const make = async (key, options, label) => {
-        if (has(cfg[key])) return;
-        const c = await g.channels.create({ ...options, reason: 'AstraBot Setup' });
-        db.setConfig(g.id, key, c.id);
-        cfg = db.getConfig(g.id);
-        made.push(`${label}: ${c}`);
+      const failed = [];
+      let newCh = 0, newRoles = 0;
+ 
+      // --- Rollen ---
+      const mkRole = async (name, color, perms, hoist) => {
+        const ex = g.roles.cache.find(r => r.name === name);
+        if (ex) return ex;
+        try { const r = await g.roles.create({ name, color, permissions: perms, hoist, reason }); newRoles++; return r; }
+        catch (e) { failed.push(`Rolle ${name}: ${e.message}`); return null; }
       };
-      await make('log_channel', { name: 'astra-logs', type: T.GuildText, permissionOverwrites: priv, topic: 'AstraBot Logs' }, 'Logs (privat)');
-      await make('level_channel', { name: 'level-ups', type: T.GuildText, topic: 'Level-Up-Nachrichten' }, 'Level-Ups');
-      await make('ticket_category', { name: '🎫・Tickets', type: T.GuildCategory, permissionOverwrites: priv }, 'Ticket-Kategorie');
-      await make('join_category', { name: '🔊・Talk', type: T.GuildCategory }, 'Talk-Kategorie');
-      await make('join_channel', { name: '➕・Raum erstellen', type: T.GuildVoice, parent: cfg.join_category }, 'Join-to-create');
-      const e = embed('✅ AstraBot eingerichtet', (made.length ? made.map(m => `• ${m}`).join('\n') : 'Alles war schon eingerichtet.') +
-        '\n\n**Nächste Schritte**\n• `/ticket` – Ticket-Panel posten\n• `/voicepanel` – Panel für Sprachräume posten\n• `/levelrole add` – Belohnungen für Level\n• `/zeitplan setzen` – Stream-Zeitplan\n• `/config anzeigen` – alle Einstellungen\n\nDer Log-Kanal ist privat – gib deinem Mod-Team dort Zugriff.');
-      await i.editReply({ embeds: [e] });
+      const mod = await mkRole('👮 Moderator', 0x2ecc71, [P.ManageMessages, P.ModerateMembers, P.KickMembers, P.MuteMembers, P.DeafenMembers, P.MoveMembers, P.ManageNicknames, P.ViewAuditLog], true);
+      const vip = await mkRole('⭐ VIP', 0xf1c40f, [], true);
+      const sub = await mkRole('💜 Subscriber', 0x9146ff, [], true);
+      if (mod && !cfg.ticket_role) { db.setConfig(g.id, 'ticket_role', mod.id); cfg = db.getConfig(g.id); }
+ 
+      // --- Rechte-Bausteine ---
+      const EV = g.id;
+      const R = (role, allow = [], deny = []) => (role ? [{ id: role.id, allow, deny }] : []);
+      const bot = { id: me.id, allow: [P.ViewChannel, P.SendMessages, P.EmbedLinks, P.ReadMessageHistory] };
+      const hidden = [{ id: EV, deny: [P.ViewChannel] }];
+      const access = {
+        public: [],
+        sub: [...hidden, ...R(sub, [P.ViewChannel]), ...R(vip, [P.ViewChannel]), ...R(mod, [P.ViewChannel]), bot],
+        team: [...hidden, ...R(mod, [P.ViewChannel]), bot],
+        tickets: [...hidden, ...R(mod, [P.ViewChannel, P.SendMessages, P.ReadMessageHistory]), bot],
+      };
+      const readonly = [{ id: EV, deny: [P.SendMessages, P.SendMessagesInThreads, P.CreatePublicThreads, P.CreatePrivateThreads] }, ...R(mod, [P.SendMessages]), bot];
+ 
+      // --- Kanäle anlegen (vorhandene werden wiederverwendet) ---
+      const make = async (spec, type, parentId, options) => {
+        let c = spec.key && cfg[spec.key] ? g.channels.cache.get(cfg[spec.key]) : null;
+        c ??= g.channels.cache.find(x => x.name === spec.name && x.type === type && (parentId === undefined || x.parentId === parentId));
+        if (c) return { c, isNew: false };
+        c = await g.channels.create({ ...options, name: spec.name, type, parent: parentId, reason });
+        newCh++;
+        return { c, isNew: true };
+      };
+ 
+      const total = LAYOUT.reduce((n, cat) => n + 1 + cat.channels.length, 0);
+      let done = 0;
+      const refs = {}, fresh = new Set();
+ 
+      for (const cat of LAYOUT) {
+        let category = null;
+        try {
+          const r = await make(cat, T.GuildCategory, undefined, { permissionOverwrites: mergeOw(access[cat.access]) });
+          category = r.c;
+          if (cat.key) { db.setConfig(g.id, cat.key, category.id); cfg = db.getConfig(g.id); }
+        } catch (e) { failed.push(`${cat.name}: ${e.message}`); }
+        done++;
+        for (const ch of cat.channels) {
+          try {
+            const type = ch.voice ? T.GuildVoice : T.GuildText;
+            const ow = mergeOw([...access[cat.access], ...(ch.ro ? readonly : [])]);
+            const r = await make(ch, type, category?.id, { permissionOverwrites: ow });
+            if (ch.key) { db.setConfig(g.id, ch.key, r.c.id); cfg = db.getConfig(g.id); }
+            if (ch.ref) { refs[ch.ref] = r.c; if (r.isNew) fresh.add(ch.ref); }
+          } catch (e) { failed.push(`${ch.name}: ${e.message}`); }
+          done++;
+        }
+        await i.editReply(`⏳ Baue den Server … ${done}/${total}`).catch(() => {});
+      }
+ 
+      // --- Start-Nachrichten (nur in neu erstellten Kanälen) ---
+      const post = async (k, payload) => { if (fresh.has(k)) await refs[k].send(payload).catch(() => {}); };
+      await post('welcome', { embeds: [embed(`👋 Willkommen auf ${g.name}!`, `Schön, dass du da bist! 💜\n\n• Regeln: ${refs.rules ?? '#regeln'}\n• Quatschen: ${refs.chat ?? '#allgemein'}\n• Stream-Zeiten: ${refs.schedule ?? '#zeitplan'}\n• Mit \`/rank\` siehst du dein Level, mit \`/help\` alle Befehle.`)] });
+      await post('rules', { embeds: [embed('📜 Regeln', RULES)] });
+      await post('schedule', { embeds: [embed('📅 Stream-Zeitplan', 'Die Stream-Zeiten findest du mit `/zeitplan anzeigen`.\nDas Team trägt sie mit `/zeitplan setzen` ein.')] });
+      await post('ticket', {
+        embeds: [embed('🎫 Support & Hilfe', 'Du brauchst Hilfe oder hast ein Anliegen?\nKlicke auf den Button – es wird ein privates Ticket für dich und das Team erstellt.')],
+        components: [new ActionRowBuilder().addComponents(btn('ticket:open', 'Ticket öffnen', '🎫', ButtonStyle.Primary))],
+      });
+      await post('voicepanel', {
+        embeds: [embed('🎙️ Sprachraum-Steuerung', 'Betritt **➕・Raum erstellen** und nutze dann die Buttons:\n🔒 sperren · 🔓 öffnen · ✏️ umbenennen · 👥 Nutzerlimit')],
+        components: [new ActionRowBuilder().addComponents(btn('voice:lock', 'Sperren', '🔒'), btn('voice:unlock', 'Öffnen', '🔓'), btn('voice:rename', 'Umbenennen', '✏️'), btn('voice:limit', 'Limit', '👥'))],
+      });
+ 
+      // --- Ergebnis ---
+      let text = newCh || newRoles
+        ? `**${newCh}** Kanäle/Kategorien und **${newRoles}** Rollen erstellt.`
+        : (failed.length ? '' : 'Es war schon alles eingerichtet.');
+      text += '\n\n**Rollen:** 👮 Moderator (Team & Support) · 💜 Subscriber · ⭐ VIP\nVergib sie an deine Leute – Subscriber/VIP sehen den Sub-Bereich, Moderatoren den Team-Bereich.';
+      text += '\n\n**Als Nächstes:** `/zeitplan setzen` · `/levelrole add` · `/config anzeigen`';
+      if (failed.length) text += `\n\n❌ **Fehlgeschlagen:**\n${failed.map(f => `• ${f}`).join('\n').slice(0, 1400)}\n\nTypische Ursache: „Missing Permissions“ – AstraBot-Rolle nach oben schieben und \`/setup\` nochmal ausführen (Vorhandenes wird nicht doppelt angelegt).`;
+      await i.editReply({ content: '', embeds: [embed(failed.length ? '⚠️ Setup teilweise abgeschlossen' : '✅ Server aufgebaut', text)] });
     },
   },
   {
@@ -159,3 +293,4 @@ module.exports = [
     },
   },
 ];
+ 
