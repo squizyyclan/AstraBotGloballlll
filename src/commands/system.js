@@ -1,10 +1,10 @@
 const { PermissionFlagsBits: P, ChannelType: T, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const db = require('../db');
 const { cmd, embed, EPH, sendLog } = require('../utils');
-
+ 
 const btn = (id, label, emoji, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setEmoji(emoji).setStyle(style);
 const show = id => (id ? `<#${id}>` : '—');
-
+ 
 module.exports = [
   {
     data: cmd('setup', 'Richtet AstraBot automatisch auf diesem Server ein', P.Administrator),
@@ -125,14 +125,22 @@ module.exports = [
     },
   },
   {
-    data: cmd('serverreset', 'Setzt ALLE AstraBot-Daten dieses Servers zurück', P.Administrator)
-      .addBooleanOption(o => o.setName('kanaele_loeschen').setDescription('Auch die von AstraBot erstellten Kanäle löschen')),
+    data: cmd('serverreset', 'Setzt den Server zurück (AstraBot-Daten oder ALLES)', P.Administrator)
+      .addStringOption(o => o.setName('umfang').setDescription('Was soll zurückgesetzt werden?').setRequired(true).addChoices(
+        { name: 'Nur AstraBot-Daten (XP, Verwarnungen, Einstellungen)', value: 'data' },
+        { name: 'AstraBot-Daten + von AstraBot erstellte Kanäle', value: 'bot' },
+        { name: 'ALLES: alle Kanäle, Rollen und AstraBot-Daten', value: 'all' })),
     async execute(i) {
       if (i.user.id !== i.guild.ownerId) return i.reply({ content: '❌ Nur der Serverinhaber darf das.', ...EPH });
-      const del = i.options.getBoolean('kanaele_loeschen') ? 1 : 0;
+      const mode = i.options.getString('umfang');
+      const text = {
+        data: 'Das löscht **alle AstraBot-Daten** dieses Servers: Einstellungen, XP/Level, Level-Rollen, Verwarnungen. Kanäle und Rollen bleiben.',
+        bot: 'Das löscht **alle AstraBot-Daten** und zusätzlich die von AstraBot erstellten Kanäle und Kategorien (Logs, Level-Ups, Join-to-create, Tickets).',
+        all: '**ALLE Kanäle und ALLE Rollen** (die der Bot löschen darf) werden gelöscht, dazu alle AstraBot-Daten. Es bleibt nur ein neuer Kanal „allgemein“.',
+      }[mode];
       await i.reply({
-        embeds: [embed('⚠️ Server-Reset', `Das löscht **alle** AstraBot-Daten dieses Servers: Einstellungen, XP/Level, Level-Rollen, Verwarnungen.${del ? '\nZusätzlich werden Log-, Level-, Join- und Ticket-Kanäle/Kategorien gelöscht.' : ''}\n\n**Das kann nicht rückgängig gemacht werden.**`)],
-        components: [new ActionRowBuilder().addComponents(btn(`reset:confirm:${i.user.id}:${del}`, 'Ja, zurücksetzen', '🗑️', ButtonStyle.Danger), btn(`reset:cancel:${i.user.id}:${del}`, 'Abbrechen', '✖️'))],
+        embeds: [embed('⚠️ Server-Reset', `${text}\n\n**Das kann nicht rückgängig gemacht werden.**${mode === 'all' ? '\nNach dem Klick musst du zusätzlich `RESET` eintippen.' : ''}`)],
+        components: [new ActionRowBuilder().addComponents(btn(`reset:confirm:${i.user.id}:${mode}`, 'Ja, zurücksetzen', '🗑️', ButtonStyle.Danger), btn(`reset:cancel:${i.user.id}:${mode}`, 'Abbrechen', '✖️'))],
         ...EPH,
       });
     },
