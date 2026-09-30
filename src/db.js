@@ -1,12 +1,12 @@
 const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
-
+ 
 const dir = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(dir, { recursive: true });
 const db = new Database(path.join(dir, 'astrabot.db'));
 db.pragma('journal_mode = WAL');
-
+ 
 db.exec(`
 CREATE TABLE IF NOT EXISTS guild_config (
   guild_id TEXT PRIMARY KEY,
@@ -21,9 +21,17 @@ CREATE TABLE IF NOT EXISTS level_roles (guild_id TEXT, level INTEGER, role_id TE
 CREATE TABLE IF NOT EXISTS warnings (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT, user_id TEXT, mod_id TEXT, reason TEXT, created_at INTEGER);
 CREATE TABLE IF NOT EXISTS temp_channels (channel_id TEXT PRIMARY KEY, guild_id TEXT, owner_id TEXT);
 `);
-
-const KEYS = ['log_channel', 'level_channel', 'xp_enabled', 'xp_min', 'xp_max', 'xp_cooldown', 'ticket_category', 'ticket_role', 'join_channel', 'join_category', 'schedule', 'twitch_url'];
-
+ 
+db.exec(`CREATE TABLE IF NOT EXISTS streamers (guild_id TEXT, login TEXT, live INTEGER DEFAULT 0, misses INTEGER DEFAULT 0, stream_id TEXT, PRIMARY KEY (guild_id, login))`);
+// Migration für bestehende Datenbanken
+{
+  const cols = db.prepare('PRAGMA table_info(guild_config)').all().map(c => c.name);
+  for (const [col, def] of [['live_channel', 'TEXT'], ['live_role', 'TEXT'], ['live_everyone', 'INTEGER DEFAULT 0']])
+    if (!cols.includes(col)) db.exec(`ALTER TABLE guild_config ADD COLUMN ${col} ${def}`);
+}
+ 
+const KEYS = ['log_channel', 'level_channel', 'xp_enabled', 'xp_min', 'xp_max', 'xp_cooldown', 'ticket_category', 'ticket_role', 'join_channel', 'join_category', 'schedule', 'twitch_url', 'live_channel', 'live_role', 'live_everyone'];
+ 
 function getConfig(g) {
   db.prepare('INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)').run(g);
   return db.prepare('SELECT * FROM guild_config WHERE guild_id=?').get(g);
@@ -33,18 +41,18 @@ function setConfig(g, key, value) {
   getConfig(g);
   db.prepare(`UPDATE guild_config SET ${key}=? WHERE guild_id=?`).run(value, g);
 }
-
+ 
 // Level
 const getUser = (g, u) => db.prepare('SELECT xp, last_msg FROM levels WHERE guild_id=? AND user_id=?').get(g, u) || { xp: 0, last_msg: 0 };
 const setXp = (g, u, xp, last) => db.prepare('INSERT INTO levels (guild_id,user_id,xp,last_msg) VALUES (?,?,?,?) ON CONFLICT(guild_id,user_id) DO UPDATE SET xp=excluded.xp, last_msg=excluded.last_msg').run(g, u, xp, last);
 const rankOf = (g, xp) => db.prepare('SELECT COUNT(*)+1 AS r FROM levels WHERE guild_id=? AND xp>?').get(g, xp).r;
 const top = (g, n) => db.prepare('SELECT user_id, xp FROM levels WHERE guild_id=? AND xp>0 ORDER BY xp DESC LIMIT ?').all(g, n);
-
+ 
 // Level-Rollen
 const addLevelRole = (g, level, role) => db.prepare('INSERT INTO level_roles (guild_id,level,role_id) VALUES (?,?,?) ON CONFLICT(guild_id,level) DO UPDATE SET role_id=excluded.role_id').run(g, level, role);
 const removeLevelRole = (g, level) => db.prepare('DELETE FROM level_roles WHERE guild_id=? AND level=?').run(g, level).changes;
 const getLevelRoles = g => db.prepare('SELECT level, role_id FROM level_roles WHERE guild_id=? ORDER BY level').all(g);
-
+ 
 // Verwarnungen
 function addWarn(g, u, mod, reason) {
   db.prepare('INSERT INTO warnings (guild_id,user_id,mod_id,reason,created_at) VALUES (?,?,?,?,?)').run(g, u, mod, reason, Date.now());
@@ -52,16 +60,23 @@ function addWarn(g, u, mod, reason) {
 }
 const listWarns = (g, u) => db.prepare('SELECT * FROM warnings WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 10').all(g, u);
 const countWarns = (g, u) => db.prepare('SELECT COUNT(*) AS c FROM warnings WHERE guild_id=? AND user_id=?').get(g, u).c;
-
+ 
 // Temporäre Sprachkanäle
 const addTemp = (c, g, o) => db.prepare('INSERT OR REPLACE INTO temp_channels VALUES (?,?,?)').run(c, g, o);
 const getTemp = c => db.prepare('SELECT * FROM temp_channels WHERE channel_id=?').get(c);
 const setTempOwner = (c, o) => db.prepare('UPDATE temp_channels SET owner_id=? WHERE channel_id=?').run(o, c);
 const removeTemp = c => db.prepare('DELETE FROM temp_channels WHERE channel_id=?').run(c);
 const allTemps = () => db.prepare('SELECT * FROM temp_channels').all();
-
+ 
+// Twitch-Streamer für Live-Meldungen
+const addStreamer = (g, l) => db.prepare('INSERT OR IGNORE INTO streamers (guild_id, login) VALUES (?,?)').run(g, l).changes;
+const removeStreamer = (g, l) => db.prepare('DELETE FROM streamers WHERE guild_id=? AND login=?').run(g, l).changes;
+const listStreamers = g => db.prepare('SELECT login FROM streamers WHERE guild_id=? ORDER BY login').all(g).map(r => r.login);
+const allStreamers = () => db.prepare('SELECT * FROM streamers').all();
+const setStreamerState = (g, l, live, misses, sid) => db.prepare('UPDATE streamers SET live=?, misses=?, stream_id=? WHERE guild_id=? AND login=?').run(live, misses, sid, g, l);
+ 
 const resetGuild = db.transaction(g => {
-  for (const t of ['guild_config', 'levels', 'level_roles', 'warnings', 'temp_channels']) db.prepare(`DELETE FROM ${t} WHERE guild_id=?`).run(g);
+  for (const t of ['guild_config', 'levels', 'level_roles', 'warnings', 'temp_channels', 'streamers']) db.prepare(`DELETE FROM ${t} WHERE guild_id=?`).run(g);
 });
-
-module.exports = { getConfig, setConfig, getUser, setXp, rankOf, top, addLevelRole, removeLevelRole, getLevelRoles, addWarn, listWarns, countWarns, addTemp, getTemp, setTempOwner, removeTemp, allTemps, resetGuild };
+ 
+module.exports = { getConfig, setConfig, getUser, setXp, rankOf, top, addLevelRole, removeLevelRole, getLevelRoles, addWarn, listWarns, countWarns, addTemp, getTemp, setTempOwner, removeTemp, allTemps, addStreamer, removeStreamer, listStreamers, allStreamers, setStreamerState, resetGuild };
