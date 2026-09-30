@@ -1,24 +1,54 @@
 const { ChannelType: T, PermissionFlagsBits: P } = require('discord.js');
 const db = require('../db');
 const { cmd, embed, EPH, sendLog } = require('../utils');
-
+ 
 const chanOpt = o => o.setName('kanal').setDescription('Kanal (Standard: aktueller Kanal)').addChannelTypes(T.GuildText, T.GuildAnnouncement);
 const reasonOpt = o => o.setName('grund').setDescription('Grund').setMaxLength(300);
-
+ 
 // --- Hilfen für /format und /glowup ---
 const clean = s => s.replace(/^[^\p{L}\p{N}]+/u, '');
 const isVoice = c => [T.GuildVoice, T.GuildStageVoice].includes(c.type);
 const slug = s => s.toLowerCase().replace(/\s+/g, '-');
-
+ 
 const EMOJI = [
-  [/regel|rules/, '📜'], [/willkommen|welcome/, '👋'], [/ank(ü|ue)ndig|announce|news/, '📢'],
-  [/live|stream|twitch/, '🔴'], [/clip|highlight/, '🎬'], [/meme|fun|lustig/, '😂'],
-  [/musik|music|song/, '🎵'], [/game|gaming|spiel/, '🎮'], [/ticket|support|hilfe|help/, '🎫'],
-  [/level|rank|xp/, '📈'], [/bot|command|befehl/, '🤖'], [/log/, '🗂️'], [/giveaway|verlos/, '🎁'],
-  [/bild|foto|art|kunst|screenshot/, '🖼️'], [/video|youtube|yt/, '📺'], [/vorschlag|idee|suggest/, '💡'],
-  [/voice|talk|lounge|sprach|warte|afk|raum/, '🔊'], [/chat|general|allgemein|quatsch/, '💬'],
+  [/raum.*erstellen|create/, '➕'], [/afk/, '💤'], [/ticket|support|hilfe|help/, '🎫'], [/vorschlag|idee|suggest/, '💡'],
+  [/regel|rules/, '📜'], [/willkommen|welcome/, '👋'], [/ank(ü|ue)ndig|announce|news/, '📢'], [/zeit|plan|schedule/, '📅'],
+  [/clip|highlight/, '🎬'], [/live|stream|twitch/, '🔴'], [/meme|fun|lustig/, '😂'], [/musik|music|song/, '🎵'],
+  [/game|gaming|spiel/, '🎮'], [/level|rank|xp/, '📈'], [/bot|command|befehl/, '🤖'], [/log/, '📝'],
+  [/giveaway|verlos/, '🎁'], [/\bart\b|kunst|bild|foto|screenshot/, '🎨'], [/video|youtube|yt/, '📺'],
+  [/sub|vip/, '💜'], [/mod|team|admin/, '👮'], [/voice|talk|lounge|sprach|warte|raum/, '🔊'], [/chat|general|allgemein|quatsch/, '💬'],
 ];
-
+ 
+// Stile: (Emoji, Name) -> neuer Kanalname
+const STILE = {
+  kanten: (e, n) => `『${e}』${n}`,
+  linse: (e, n) => `【${e}】${n}`,
+  ecken: (e, n) => `「${e}」${n}`,
+  punkt: (e, n) => `${e}・${n}`,
+  balken: (e, n) => `${e}┃${n}`,
+  pfeil: (e, n) => `${e}》${n}`,
+};
+const STIL_CHOICES = [
+  { name: '『💬』name', value: 'kanten' }, { name: '【💬】name', value: 'linse' }, { name: '「💬」name', value: 'ecken' },
+  { name: '💬・name', value: 'punkt' }, { name: '💬┃name', value: 'balken' }, { name: '💬》name', value: 'pfeil' },
+];
+const ANY_EMOJI = /(?:\p{Emoji_Presentation}|\p{Emoji}\uFE0F)(?:\u200D(?:\p{Emoji_Presentation}|\p{Emoji}\uFE0F))*/u;
+ 
+// Vorhandenes Emoji behalten, sonst passendes anhand des Namens wählen
+function pickEmoji(name, voice) {
+  const own = (name.match(/^[^\p{L}\p{N}]+/u)?.[0] ?? '').match(ANY_EMOJI); // Emoji im Präfix, auch in 『』 oder 【】
+  if (own) return own[0];
+  const key = clean(name).toLowerCase();
+  const hit = EMOJI.find(([re]) => re.test(key));
+  return hit ? hit[1] : voice ? '🔊' : '💬';
+}
+function styleName(name, voice, stil) {
+  const base = clean(name);
+  if (!base) return null;
+  const n = voice ? base : slug(base);
+  return stil === 'none' ? n : STILE[stil](pickEmoji(name, voice), n);
+}
+ 
 async function renameRun(i, buildName, title) {
   await i.deferReply(EPH);
   const target = i.options.getChannel('kanal');
@@ -41,7 +71,7 @@ async function renameRun(i, buildName, title) {
   await i.editReply(`✅ ${ok}/${changes.length} Kanäle umbenannt.`);
   sendLog(i.guild, embed(title, `${i.user}: ${ok} Kanäle umbenannt.`));
 }
-
+ 
 module.exports = [
   {
     data: cmd('lock', 'Sperrt einen Kanal für @everyone', P.ManageChannels).addChannelOption(chanOpt).addStringOption(reasonOpt),
@@ -75,29 +105,23 @@ module.exports = [
     },
   },
   {
-    data: cmd('format', 'Vereinheitlicht Kanalnamen mit einem Stil-Symbol', P.ManageChannels)
-      .addStringOption(o => o.setName('stil').setDescription('Symbol vor dem Kanalnamen').setRequired(true).addChoices(
-        { name: 'Punkt ・chat', value: '・' }, { name: 'Balken ┃chat', value: '┃' }, { name: 'Pfeil 》chat', value: '》' },
-        { name: 'Stern ✦chat', value: '✦' }, { name: 'Dreieck ▸chat', value: '▸' }, { name: 'Ohne Symbol (entfernen)', value: 'none' }))
+    data: cmd('format', 'Kanalnamen mit passendem Emoji formatieren, z.B. 『💬』allgemein', P.ManageChannels)
+      .addStringOption(o => o.setName('stil').setDescription('Stil der Kanalnamen').setRequired(true).addChoices(...STIL_CHOICES, { name: 'Ohne Emoji/Symbol (entfernen)', value: 'none' }))
       .addChannelOption(o => o.setName('kanal').setDescription('Nur dieser Kanal (Standard: alle Kanäle)'))
       .addBooleanOption(o => o.setName('anwenden').setDescription('True = wirklich umbenennen, False = nur Vorschau')),
     async execute(i) {
       const stil = i.options.getString('stil');
-      const prefix = stil === 'none' ? '' : stil;
-      return renameRun(i, (name, voice) => { const b = clean(name); return b ? prefix + (voice ? b : slug(b)) : null; }, '🎨 Format');
+      return renameRun(i, (name, voice) => styleName(name, voice, stil), '🎨 Format');
     },
   },
   {
-    data: cmd('glowup', 'Verpasst Kanälen passende Emojis (Glow-up)', P.ManageChannels)
+    data: cmd('glowup', 'Glow-up: passende Emojis für alle Kanäle (Standard: 『💬』name)', P.ManageChannels)
+      .addStringOption(o => o.setName('stil').setDescription('Stil (Standard: 『💬』name)').addChoices(...STIL_CHOICES))
       .addChannelOption(o => o.setName('kanal').setDescription('Nur dieser Kanal (Standard: alle Kanäle)'))
       .addBooleanOption(o => o.setName('anwenden').setDescription('True = wirklich umbenennen, False = nur Vorschau')),
     async execute(i) {
-      return renameRun(i, (name, voice) => {
-        const b = clean(name);
-        if (!b) return null;
-        const hit = EMOJI.find(([re]) => re.test(b.toLowerCase()));
-        return `${hit ? hit[1] : voice ? '🔊' : '💬'}・${voice ? b : slug(b)}`;
-      }, '✨ Glow-up');
+      const stil = i.options.getString('stil') ?? 'kanten';
+      return renameRun(i, (name, voice) => styleName(name, voice, stil), '✨ Glow-up');
     },
   },
 ];
