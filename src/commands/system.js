@@ -1,6 +1,7 @@
 const { PermissionFlagsBits: P, ChannelType: T, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const db = require('../db');
-const { cmd, embed, EPH, sendLog } = require('../utils');
+const { cmd, embed, EPH, sendLog, voicePanel } = require('../utils');
+const live = require('../live');
  
 const btn = (id, label, emoji, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setEmoji(emoji).setStyle(style);
 const show = id => (id ? `<#${id}>` : '—');
@@ -14,7 +15,7 @@ const LAYOUT = [
     { name: '📅・zeitplan', ro: true, ref: 'schedule' },
   ] },
   { name: '🔴・TWITCH', access: 'public', channels: [
-    { name: '🔴・live-benachrichtigung', ro: true },
+    { name: '🔴・live-benachrichtigung', ro: true, key: 'live_channel' },
     { name: '🎬・clips-und-highlights' },
     { name: '💡・stream-vorschläge' },
   ] },
@@ -25,7 +26,6 @@ const LAYOUT = [
     { name: '🎨・kunst-und-bilder' },
     { name: '🤖・bot-befehle' },
     { name: '📈・level-ups', ro: true, key: 'level_channel' },
-    { name: '🎤・raum-steuerung', ro: true, ref: 'voicepanel' },
   ] },
   { name: '🔊・TALK', access: 'public', key: 'join_category', channels: [
     { name: '➕・Raum erstellen', voice: true, key: 'join_channel' },
@@ -154,17 +154,13 @@ module.exports = [
         embeds: [embed('🎫 Support & Hilfe', 'Du brauchst Hilfe oder hast ein Anliegen?\nKlicke auf den Button – es wird ein privates Ticket für dich und das Team erstellt.')],
         components: [new ActionRowBuilder().addComponents(btn('ticket:open', 'Ticket öffnen', '🎫', ButtonStyle.Primary))],
       });
-      await post('voicepanel', {
-        embeds: [embed('🎙️ Sprachraum-Steuerung', 'Betritt **➕・Raum erstellen** und nutze dann die Buttons:\n🔒 sperren · 🔓 öffnen · ✏️ umbenennen · 👥 Nutzerlimit')],
-        components: [new ActionRowBuilder().addComponents(btn('voice:lock', 'Sperren', '🔒'), btn('voice:unlock', 'Öffnen', '🔓'), btn('voice:rename', 'Umbenennen', '✏️'), btn('voice:limit', 'Limit', '👥'))],
-      });
  
       // --- Ergebnis ---
       let text = newCh || newRoles
         ? `**${newCh}** Kanäle/Kategorien und **${newRoles}** Rollen erstellt.`
         : (failed.length ? '' : 'Es war schon alles eingerichtet.');
       text += '\n\n**Rollen:** 👮 Moderator (Team & Support) · 💜 Subscriber · ⭐ VIP\nVergib sie an deine Leute – Subscriber/VIP sehen den Sub-Bereich, Moderatoren den Team-Bereich.';
-      text += '\n\n**Als Nächstes:** `/zeitplan setzen` · `/levelrole add` · `/config anzeigen`';
+      text += '\n\n**Als Nächstes:** `/config streamer` (Live-Meldungen) · `/zeitplan setzen` · `/levelrole add` · `/config anzeigen`';
       if (failed.length) text += `\n\n❌ **Fehlgeschlagen:**\n${failed.map(f => `• ${f}`).join('\n').slice(0, 1400)}\n\nTypische Ursache: „Missing Permissions“ – AstraBot-Rolle nach oben schieben und \`/setup\` nochmal ausführen (Vorhandenes wird nicht doppelt angelegt).`;
       await i.editReply({ content: '', embeds: [embed(failed.length ? '⚠️ Setup teilweise abgeschlossen' : '✅ Server aufgebaut', text)] });
     },
@@ -178,7 +174,17 @@ module.exports = [
         .addIntegerOption(o => o.setName('max').setDescription('Maximale XP pro Nachricht').setMinValue(1).setMaxValue(100))
         .addIntegerOption(o => o.setName('cooldown').setDescription('Sekunden zwischen XP-Gewinnen').setMinValue(0).setMaxValue(3600)))
       .addSubcommand(s => s.setName('supportrolle').setDescription('Rolle, die Tickets sehen darf')
-        .addRoleOption(o => o.setName('rolle').setDescription('Support-Rolle (leer = entfernen)'))),
+        .addRoleOption(o => o.setName('rolle').setDescription('Support-Rolle (leer = entfernen)')))
+      .addSubcommand(s => s.setName('live').setDescription('Kanal und Ping für Live-Benachrichtigungen')
+        .addChannelOption(o => o.setName('kanal').setDescription('Kanal für Live-Meldungen').addChannelTypes(T.GuildText, T.GuildAnnouncement))
+        .addRoleOption(o => o.setName('pingrolle').setDescription('Rolle, die bei Live-Start gepingt wird'))
+        .addBooleanOption(o => o.setName('everyone').setDescription('Zusätzlich @everyone pingen'))
+        .addBooleanOption(o => o.setName('kein_ping').setDescription('Keinen Ping verwenden'))
+        .addBooleanOption(o => o.setName('aus').setDescription('Live-Benachrichtigungen ausschalten')))
+      .addSubcommand(s => s.setName('streamer').setDescription('Twitch-Kanäle für Live-Meldungen verwalten')
+        .addStringOption(o => o.setName('aktion').setDescription('Was tun?').setRequired(true).addChoices(
+          { name: 'Hinzufügen', value: 'add' }, { name: 'Entfernen', value: 'remove' }, { name: 'Liste anzeigen', value: 'list' }))
+        .addStringOption(o => o.setName('name').setDescription('Twitch-Name oder Link, z.B. twitch.tv/name'))),
     async execute(i) {
       const g = i.guild.id;
       const sub = i.options.getSubcommand();
@@ -191,6 +197,37 @@ module.exports = [
         if (cd !== null) db.setConfig(g, 'xp_cooldown', cd);
       }
       if (sub === 'supportrolle') db.setConfig(g, 'ticket_role', i.options.getRole('rolle')?.id ?? null);
+ 
+      if (sub === 'live') {
+        if (i.options.getBoolean('aus')) { db.setConfig(g, 'live_channel', null); return i.reply({ content: '✅ Live-Benachrichtigungen sind ausgeschaltet.', ...EPH }); }
+        const ch = i.options.getChannel('kanal'), role = i.options.getRole('pingrolle'), everyone = i.options.getBoolean('everyone');
+        if (ch) db.setConfig(g, 'live_channel', ch.id);
+        if (role) db.setConfig(g, 'live_role', role.id);
+        if (everyone !== null) db.setConfig(g, 'live_everyone', everyone ? 1 : 0);
+        if (i.options.getBoolean('kein_ping')) { db.setConfig(g, 'live_role', null); db.setConfig(g, 'live_everyone', 0); }
+        const c = db.getConfig(g);
+        return i.reply({ content: `✅ Live-Meldungen: ${c.live_channel ? `<#${c.live_channel}>` : 'noch kein Kanal – gib „kanal“ an'}\nPing: ${c.live_everyone ? '@everyone' : c.live_role ? `<@&${c.live_role}>` : 'keiner'}`, allowedMentions: { parse: [] }, ...EPH });
+      }
+ 
+      if (sub === 'streamer') {
+        const action = i.options.getString('aktion');
+        if (action === 'list') {
+          const list = db.listStreamers(g);
+          return i.reply({ content: list.length ? `📺 Überwachte Kanäle:\n${list.map(l => `• twitch.tv/${l}`).join('\n')}` : 'Noch keine Twitch-Kanäle. Mit `/config streamer` → Hinzufügen eintragen.', ...EPH });
+        }
+        const login = live.parseLogin(i.options.getString('name') ?? '');
+        if (!login) return i.reply({ content: '❌ Bitte gib einen gültigen Twitch-Namen oder Link an (Feld „name“).', ...EPH });
+        if (action === 'remove') return i.reply({ content: db.removeStreamer(g, login) ? `✅ **${login}** entfernt.` : 'Dieser Kanal steht nicht in der Liste.', ...EPH });
+        if (!live.enabled()) return i.reply({ content: '❌ Die Twitch-API ist noch nicht eingerichtet. Trage `TWITCH_CLIENT_ID` und `TWITCH_CLIENT_SECRET` in Railway ein (Anleitung in der README).', ...EPH });
+        if (db.listStreamers(g).length >= 10) return i.reply({ content: '❌ Maximal 10 Twitch-Kanäle pro Server.', ...EPH });
+        await i.deferReply(EPH);
+        let user;
+        try { user = await live.userExists(login); } catch (e) { return i.editReply(`❌ Twitch-API-Fehler: ${e.message}`); }
+        if (!user) return i.editReply(`❌ Auf Twitch gibt es keinen Kanal „${login}“.`);
+        const added = db.addStreamer(g, user.login);
+        const hint = db.getConfig(g).live_channel ? '' : '\n⚠️ Es ist noch kein Kanal für Live-Meldungen gesetzt – nutze `/config live`.';
+        return i.editReply(added ? `✅ **${user.display_name}** wird jetzt überwacht.${hint}` : 'Dieser Kanal ist schon in der Liste.');
+      }
       const c = db.getConfig(g);
       const e = embed(`⚙️ Einstellungen – ${i.guild.name}`).addFields(
         { name: 'Logs', value: show(c.log_channel), inline: true },
@@ -199,6 +236,7 @@ module.exports = [
         { name: 'Ticket-Kategorie', value: show(c.ticket_category), inline: true },
         { name: 'Join-to-create', value: show(c.join_channel), inline: true },
         { name: 'Twitch', value: c.twitch_url ?? '—', inline: true },
+        { name: 'Live-Meldungen', value: `${show(c.live_channel)} · Ping: ${c.live_everyone ? '@everyone' : c.live_role ? `<@&${c.live_role}>` : 'keiner'}\nKanäle: ${db.listStreamers(g).join(', ') || '—'}`.slice(0, 1000) },
         { name: 'XP-System', value: `${c.xp_enabled ? 'an' : 'aus'} · ${c.xp_min}–${c.xp_max} XP · ${c.xp_cooldown}s Cooldown` },
       );
       await i.reply({ embeds: [e], allowedMentions: { parse: [] }, ...EPH });
@@ -247,15 +285,16 @@ module.exports = [
     },
   },
   {
-    data: cmd('voicepanel', 'Postet das Steuer-Panel für eigene Sprachräume', P.ManageGuild)
-      .addChannelOption(o => o.setName('kanal').setDescription('Wo soll das Panel erscheinen? (Standard: hier)').addChannelTypes(T.GuildText)),
+    data: cmd('voicepanel', 'Postet das Steuer-Panel in deinem Sprachraum erneut')
+      .addChannelOption(o => o.setName('kanal').setDescription('Sprachraum (Standard: dein aktueller Raum)').addChannelTypes(T.GuildVoice)),
     async execute(i) {
-      const ch = i.options.getChannel('kanal') ?? i.channel;
-      await ch.send({
-        embeds: [embed('🎙️ Sprachraum-Steuerung', 'Sei in **deinem** Sprachraum (Join-to-create) und nutze die Buttons:\n🔒 sperren · 🔓 öffnen · ✏️ umbenennen · 👥 Nutzerlimit')],
-        components: [new ActionRowBuilder().addComponents(btn('voice:lock', 'Sperren', '🔒'), btn('voice:unlock', 'Öffnen', '🔓'), btn('voice:rename', 'Umbenennen', '✏️'), btn('voice:limit', 'Limit', '👥'))],
-      });
-      await i.reply({ content: `✅ Panel in ${ch} gepostet.`, ...EPH });
+      const ch = i.options.getChannel('kanal') ?? i.member.voice.channel;
+      if (!ch) return i.reply({ content: '❌ Betritt zuerst deinen Sprachraum.', ...EPH });
+      const row = db.getTemp(ch.id);
+      if (!row) return i.reply({ content: '❌ Das ist kein AstraBot-Raum (Join-to-create).', ...EPH });
+      if (row.owner_id !== i.user.id && !i.memberPermissions.has(P.ManageChannels)) return i.reply({ content: '❌ Nur der Besitzer des Raums darf das.', ...EPH });
+      await ch.send(voicePanel());
+      await i.reply({ content: `✅ Panel im Voice-Chat von ${ch} gepostet.`, ...EPH });
     },
   },
   {
